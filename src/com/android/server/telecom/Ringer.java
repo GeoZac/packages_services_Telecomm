@@ -20,6 +20,9 @@ import static android.provider.CallLog.Calls.USER_MISSED_DND_MODE;
 import static android.provider.CallLog.Calls.USER_MISSED_LOW_RING_VOLUME;
 import static android.provider.CallLog.Calls.USER_MISSED_NO_VIBRATE;
 
+import android.content.pm.PackageManager;
+import android.hardware.camera2.CameraManager;
+import android.os.AsyncTask;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.Person;
@@ -223,6 +226,8 @@ public class Ringer {
 
     private CompletableFuture<Void> mVibrateFuture = CompletableFuture.completedFuture(null);
 
+    private TorchToggler torchToggler;
+
     private InCallTonePlayer mCallWaitingPlayer;
     private RingtoneFactory mRingtoneFactory;
     private AudioManager mAudioManager;
@@ -247,6 +252,8 @@ public class Ringer {
      * lock
      */
     private final Object mLock;
+
+    private int torchMode;
 
     /** Initializes the Ringer. */
     @VisibleForTesting
@@ -275,7 +282,10 @@ public class Ringer {
 
         updateVibrationPattern();
 
+        torchToggler = new TorchToggler(context);
+
         mSettingObserver = new SettingsObserver(getHandler());
+
         mContext.getContentResolver().registerContentObserver(
             Settings.System.getUriFor(Settings.System.RINGTONE_VIBRATION_PATTERN),
             false, mSettingObserver, UserHandle.USER_CURRENT);
@@ -449,6 +459,17 @@ public class Ringer {
                     isVibratorEnabled, attributes.isRingerAudible());
         }
 
+        boolean dndMode = !isRingerAudible;
+        torchMode = Settings.System.getIntForUser(mContext.getContentResolver(),
+                 Settings.System.FLASHLIGHT_ON_CALL, 1, UserHandle.USER_CURRENT);
+
+        boolean shouldFlash = (torchMode == 1 && !dndMode) ||
+                              (torchMode == 2 && dndMode)  ||
+                               torchMode == 3;
+        if (shouldFlash) {
+            blinkFlashlight();
+        }
+
         return attributes.shouldAcquireAudioFocus();
     }
 
@@ -503,6 +524,11 @@ public class Ringer {
         return effect;
     }
 
+    private void blinkFlashlight() {
+        torchToggler = new TorchToggler(mContext);
+        torchToggler.execute();
+    }
+
     public void startCallWaiting(Call call) {
         startCallWaiting(call, null);
     }
@@ -543,6 +569,7 @@ public class Ringer {
             }
 
             mRingtonePlayer.stop();
+            torchToggler.stop();
 
             // If we haven't started vibrating because we were waiting for the haptics info, cancel
             // it and don't vibrate at all.
@@ -773,6 +800,48 @@ public class Ringer {
         @Override
         public void onChange(boolean SelfChange) {
             updateVibrationPattern();
+        }
+    }
+
+    private class TorchToggler extends AsyncTask {
+
+        private boolean shouldStop = false;
+        private CameraManager cameraManager;
+        private int duration = 400;
+        private boolean hasFlash = true;
+        private Context context;
+
+        public TorchToggler(Context ctx) {
+            this.context = ctx;
+            init();
+        }
+
+        private void init() {
+            cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            hasFlash = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_FLASH);
+        }
+
+        void stop() {
+            shouldStop = true;
+        }
+
+        @Override
+        protected Object doInBackground(Object[] objects) {
+            if (hasFlash) {
+                try {
+                    String cameraId = cameraManager.getCameraIdList()[0];
+                    while (!shouldStop) {
+                        cameraManager.setTorchMode(cameraId, true);
+                        Thread.sleep(duration);
+
+                        cameraManager.setTorchMode(cameraId, false);
+                        Thread.sleep(duration);
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            return null;
         }
     }
 }
